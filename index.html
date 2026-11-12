@@ -179,7 +179,7 @@ input[type=range]:active::-webkit-slider-runnable-track{height:12px}
   <div id="empty" class="empty">
     <div class="big glass"><svg><use href="#i-note"/></svg></div>
     <h2>No music yet</h2>
-    <p>Add songs from your device and they play without internet. You can also paste YouTube or YouTube Music links, which need a connection.</p>
+    <p>Add songs from your device. They are saved inside this app, so they play without internet and you can delete the original files from your phone. You can also paste YouTube or YouTube Music links, which need a connection.</p>
     <button class="go" id="add2">Add music</button>
   </div>
   <div id="shelves"></div>
@@ -243,7 +243,7 @@ input[type=range]:active::-webkit-slider-runnable-track{height:12px}
 (()=>{
 const $=id=>document.getElementById(id);
 const au=$('au');
-let songs=[],queue=[],qi=-1,shuffle=false,repeat=0,editing=false,url=null,filter='';
+let songs=[],queue=[],qi=-1,shuffle=false,repeat=0,editing=false,url=null,filter='',usage='';
 
 /* ---------- storage (IndexedDB, works offline) ---------- */
 let db;
@@ -274,22 +274,43 @@ let stats={};try{stats=JSON.parse(localStorage.getItem('mp-stats')||'{}')}catch{
 const saveStats=()=>{try{localStorage.setItem('mp-stats',JSON.stringify(stats))}catch{}};
 
 /* ---------- library ---------- */
+async function updateUsage(){
+  try{
+    if(!(navigator.storage&&navigator.storage.estimate))return;
+    const e=await navigator.storage.estimate(),mb=(e.usage||0)/1048576;
+    usage=mb>=1024?(mb/1024).toFixed(1)+' GB':Math.round(mb)+' MB';
+    if(songs.length)$('count').textContent=`${songs.length} song${songs.length>1?'s':''} \u00b7 ${usage} saved in app`;
+  }catch{}
+}
 async function load(){
   db=await open();
   songs=(await tx('readonly',s=>s.getAll()))||[];
   songs.sort((a,b)=>a.added-b.added);
-  render();
+  render();updateUsage();
 }
 async function addFiles(files){
-  let n=0;
+  let n=0,dup=0,fail=0;
+  // ask the browser not to clear this storage when space runs low
+  try{if(navigator.storage&&navigator.storage.persist)await navigator.storage.persist()}catch{}
+  const total=files.length;
   for(const f of files){
     if(!f.type.startsWith('audio/')&&!/\.(mp3|m4a|aac|wav|flac|ogg|opus)$/i.test(f.name))continue;
-    const p=parse(f.name);
-    const rec={id:Date.now()+'-'+Math.random().toString(36).slice(2,7),name:f.name,...p,blob:f,added:Date.now()+n++};
-    await tx('readwrite',s=>s.put(rec));
-    songs.push(rec);
+    if(songs.some(x=>x.name===f.name&&x.size===f.size)){dup++;continue}
+    if(total>1)toast(`Saving ${n+dup+fail+1} of ${total}\u2026`);
+    try{
+      // make a real copy of the audio data inside the app (not a link to the file on your phone)
+      const copy=new Blob([await f.arrayBuffer()],{type:f.type});
+      const p=parse(f.name);
+      const rec={id:Date.now()+'-'+Math.random().toString(36).slice(2,7),name:f.name,size:f.size,...p,blob:copy,added:Date.now()+n};
+      await tx('readwrite',st=>st.put(rec));
+      songs.push(rec);n++;
+    }catch(e){fail++}
   }
-  render();
+  render();updateUsage();
+  if(n&&!fail)toast(`Saved ${n} song${n>1?'s':''} in the app. You can delete the originals from your phone.`);
+  else if(n&&fail)toast(`Saved ${n}, but ${fail} failed (storage may be full). Keep those originals.`);
+  else if(fail)toast('Could not save. Your phone storage may be full. Keep the original files.');
+  else if(dup)toast('Already in your library');
 }
 async function remove(id){
   await tx('readwrite',s=>s.delete(id));
@@ -298,7 +319,7 @@ async function remove(id){
   if(cur&&cur.id===id){doPause();au.removeAttribute('src');queue=[];qi=-1;$('mini').classList.remove('on');closeFull()}
   else if(cur){queue=queue.filter(s=>s.id!==id);qi=queue.findIndex(s=>s.id===cur.id)}
   if(!songs.length)editing=false;
-  render();
+  render();updateUsage();
 }
 
 let shelfLists={};
@@ -329,7 +350,7 @@ function render(){
   $('searchbar').classList.toggle('hide',songs.length<8);
   $('edit').classList.toggle('hide',!has);
   $('edit').textContent=editing?'Done':'Edit';
-  $('count').textContent=has?`${songs.length} song${songs.length>1?'s':''}`:'';
+  $('count').textContent=has?`${songs.length} song${songs.length>1?'s':''}`+(usage?` \u00b7 ${usage} saved in app`:''):'';
   const q=filter.toLowerCase();
   const cur=queue[qi];
   const showShelves=(has||ytCache.playlists.length>0)&&!editing&&!q;
