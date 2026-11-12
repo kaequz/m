@@ -7,6 +7,9 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="theme-color" content="#000000">
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="icon" type="image/png" href="icon-192.png">
 <title>Music</title>
 <style>
 :root{
@@ -391,15 +394,15 @@ async function addLinks(text){
 }
 
 /* ---------- playback ---------- */
-let yt=null,ytReady=false,ytPending=null,ytPlaying=false,tt;
+let yt=null,ytReady=false,ytPending=null,ytPlaying=false,tt,userPaused=false;
 const cur=()=>queue[qi];
 const isYT=()=>!!(cur()&&cur().yt);
 const isPlaying=()=>isYT()?ytPlaying:!au.paused;
 const curTime=()=>isYT()?(ytReady?yt.getCurrentTime()||0:0):au.currentTime;
 const curDur=()=>isYT()?(ytReady?yt.getDuration()||0:0):au.duration;
 const seekTo=t=>{if(isYT()){if(ytReady)yt.seekTo(t,true)}else au.currentTime=t};
-const doPlay=()=>{if(isYT()){if(ytReady)yt.playVideo()}else au.play().catch(()=>{})};
-const doPause=()=>{if(isYT()){if(ytReady)yt.pauseVideo()}else au.pause()};
+const doPlay=()=>{userPaused=false;if(isYT()){if(ytReady)yt.playVideo()}else au.play().catch(()=>{})};
+const doPause=()=>{userPaused=true;if(isYT()){if(ytReady)yt.pauseVideo()}else au.pause()};
 function toast(m){const t=$('toast');t.textContent=m;t.classList.add('on');clearTimeout(tt);tt=setTimeout(()=>t.classList.remove('on'),3500)}
 function loadYT(){
   if(window.YT&&YT.Player)return initYT();
@@ -428,6 +431,7 @@ function setQueue(list,start,doShuffle){
 function playCurrent(){
   const s=queue[qi];if(!s)return;
   const stt=stats[s.id]||(stats[s.id]={plays:0,last:0});stt.plays++;stt.last=Date.now();saveStats();
+  userPaused=false;
   if(url){URL.revokeObjectURL(url);url=null}
   $('full').classList.toggle('isyt',!!s.yt);
   if(s.yt){
@@ -448,7 +452,7 @@ function playCurrent(){
   document.title=s.title+' \u2013 Music';
   if('mediaSession'in navigator){
     const md={title:s.title,artist:s.artist,album:s.yt?'YouTube':'Offline Library'};
-    if(s.yt)md.artwork=[{src:`https://i.ytimg.com/vi/${s.yt}/mqdefault.jpg`,sizes:'320x180',type:'image/jpeg'}];
+    md.artwork=s.yt?[{src:`https://i.ytimg.com/vi/${s.yt}/mqdefault.jpg`,sizes:'320x180',type:'image/jpeg'}]:[{src:'icon-512.png',sizes:'512x512',type:'image/png'}];
     navigator.mediaSession.metadata=new MediaMetadata(md);
   }
   syncState();render();
@@ -481,6 +485,9 @@ function tick(){
   $('mprog').style.width=r*100+'%';
   if(!seeking){$('seek').value=r*1000;$('seek').style.setProperty('--p',r*100+'%')}
   $('cur').textContent=fmt(c);$('dur').textContent='-'+fmt((d||0)-c);
+  if('mediaSession'in navigator&&navigator.mediaSession.setPositionState&&d&&isFinite(d)){
+    try{navigator.mediaSession.setPositionState({duration:d,playbackRate:1,position:Math.min(Math.max(c,0),d)})}catch{}
+  }
 }
 au.addEventListener('play',syncState);au.addEventListener('pause',syncState);
 au.addEventListener('timeupdate',()=>{if(!isYT())tick()});au.addEventListener('loadedmetadata',()=>{if(!isYT())tick()});
@@ -495,8 +502,62 @@ if('mediaSession'in navigator){
   const ms=navigator.mediaSession;
   ms.setActionHandler('play',doPlay);ms.setActionHandler('pause',doPause);
   ms.setActionHandler('nexttrack',()=>next());ms.setActionHandler('previoustrack',prev);
-  ms.setActionHandler('seekto',e=>seekTo(e.seekTime));
+  const sa=(a,f)=>{try{ms.setActionHandler(a,f)}catch{}};
+  sa('seekto',e=>seekTo(e.seekTime));
+  sa('seekbackward',e=>seekTo(Math.max(0,curTime()-(e.seekOffset||10))));
+  sa('seekforward',e=>seekTo(Math.min(curDur()||0,curTime()+(e.seekOffset||10))));
 }
+
+/* ---------- keep playing in the background ---------- */
+// If the browser pauses local audio when the page is hidden (not the user), start it again.
+let resumeTries=0,wasYT=false;
+au.addEventListener('pause',()=>{
+  if(document.hidden&&!userPaused&&!au.ended&&au.src&&!isYT()&&resumeTries<2){
+    resumeTries++;setTimeout(()=>{if(!userPaused&&au.paused)au.play().catch(()=>{})},200);
+  }
+});
+au.addEventListener('playing',()=>{resumeTries=0});
+document.addEventListener('visibilitychange',()=>{
+  if(document.hidden){wasYT=isYT()&&ytPlaying;resumeTries=0;return}
+  // back in the page: pick up where we were if the browser paused us
+  if(userPaused||!queue.length)return;
+  if(isYT()){if(wasYT&&ytReady&&!ytPlaying)yt.playVideo()}
+  else if(au.src&&au.paused&&!au.ended)au.play().catch(()=>{});
+});
+window.addEventListener('pageshow',e=>{if(e.persisted&&!userPaused&&queue.length&&!isYT()&&au.paused)au.play().catch(()=>{})});
+
+/* ---------- Back button: close panels first, never drop the music by accident ---------- */
+(()=>{
+  const layerEls=()=>['menu','sheet','acct','full','plview'].map($).filter(el=>el&&el.classList.contains('open'));
+  let depth=0,ignore=0,lastBack=0;
+  if(!(history.state&&history.state.g)){history.replaceState({r:1},'');history.pushState({g:1},'')}
+  function sync(){
+    const n=layerEls().length;
+    while(depth<n){history.pushState({l:++depth},'')}
+    if(depth>n){const d=depth-n;depth=n;ignore++;history.go(-d)}
+  }
+  const obs=new MutationObserver(sync);
+  ['menu','sheet','acct','full','plview'].forEach(id=>{const el=$(id);if(el)obs.observe(el,{attributes:true,attributeFilter:['class']})});
+  window.addEventListener('popstate',()=>{
+    if(ignore>0){ignore--;return}
+    if(depth>0){
+      depth--;
+      const top=layerEls()[0];
+      if(top.id==='menu'||top.id==='sheet'||top.id==='acct'){document.querySelectorAll('.sheet').forEach(x=>x.classList.remove('open'));$('menu').classList.remove('open');$('scrim').classList.remove('on');try{$('links').blur()}catch{}}
+      else if(top.id==='full')$('full').classList.remove('open');
+      else top.classList.remove('open');
+      return;
+    }
+    // at the root: protect playing music from an accidental back
+    const playing=queue.length&&isPlaying();
+    if(playing&&Date.now()-lastBack>2500){
+      lastBack=Date.now();history.pushState({g:1},'');
+      toast('Press back again to exit. Music stops if you leave; use Home to keep it playing.');
+      return;
+    }
+    history.back();
+  });
+})();
 
 /* ---------- UI wiring ---------- */
 const pick=()=>$('file').click();
@@ -678,6 +739,7 @@ $('acct').onclick=e=>{
 $('acctbtn').onclick=()=>{renderAcct();$('acct').classList.add('open');$('scrim').classList.add('on');if(clientId)gsi().catch(()=>{})};
 
 load();
+if('serviceWorker'in navigator&&/^https?:$/.test(location.protocol))window.addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
 })();
 </script>
 </body>
